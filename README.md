@@ -19,7 +19,7 @@ Defenders should review the output and determine whether each identity is highly
 
 #### Example Output
 
-| Identity              | OU Distinguished Name                          |
+| Identity              | OUs                          |
 |-----------------------|------------------------------------------------|
 | CORP\svc_app          | {OU=Apps,DC=corp,DC=local}                       |
 | CORP\UserCreators     | {OU=Tier1,OU=IT,DC=corp,DC=local}                |

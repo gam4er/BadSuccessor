@@ -1,30 +1,30 @@
 function Get-BadSuccessorOUPermissions {
     <#
     .SYNOPSIS
-    Get all principals that are allowed to perform BadSuccessor and on which OUs.
-    
+        Lists every principal that can perform a BadSuccessor attack and the OUs where it holds the required permissions.
+
     .DESCRIPTION
-    Scans all Organizational Units (OUs) for Access Control Entries (ACEs) granting permissions that could allow creation of a delegated Managed Service Account (dMSA),
-    enabling a potential BadSuccessor privilege escalation attack.
+        Scans all Organizational Units (OUs) for Access Control Entries (ACEs) granting permissions that could allow creation of a delegated Managed Service Account (dMSA),
+        enabling a potential BadSuccessor privilege escalation attack.
 
-    Built-in privileged identities (e.g., Domain Admins, Administrators, SYSTEM, Enterprise Admins) are excluded from results. 
-    This script does not evaluate DENY ACEs and therefore, some false positives may occur.
+        Built-in privileged identities (e.g., Domain Admins, Administrators, SYSTEM, Enterprise Admins) are excluded from results. 
+        This script does not evaluate DENY ACEs and therefore, some false positives may occur.
 
-    Note: We do not expand group membership and the permissions list used may not be exhaustive. Indirect rights such as WriteDACL on the OU are considered.
+        Note: We do not expand group membership and the permissions list used may not be exhaustive. Indirect rights such as WriteDACL on the OU are considered.
     #>
 
     [CmdletBinding()]
     param ()
 
-    function Test-ExcludedSID {
-        <#
-        .SYNOPSIS
-            Returns $true if the identity is in the excluded SIDs list (e.g., Domain Admins).
-        #>
+    # Cache for IsExcludedSID to reduce network calls
+    $SidCache = @{}
 
-        Param (
-            $IdentityReference = ""
-        )
+    function Test-IsExcludedSID {
+        Param ([string]$IdentityReference)
+
+        if ($SidCache.ContainsKey($IdentityReference)) {
+            return $SidCache[$IdentityReference]      # instant hit
+        }
 
         try {
             if ($IdentityReference -match '^S-\d-\d+(-\d+)+$') {
@@ -32,16 +32,20 @@ function Get-BadSuccessorOUPermissions {
             } else {
                 $sid = (New-Object System.Security.Principal.NTAccount($IdentityReference)).Translate([System.Security.Principal.SecurityIdentifier]).Value
             }
-        }
-        catch {
+        } catch {
             Write-Verbose "Failed to translate $IdentityReference to SID: $_"
+            $SidCache[$IdentityReference] = $false
             return $false
         }
+        
         # Check excluded SID list and Enterprise Admins (RID 519)
         if (($sid -and ($excludedSids -contains $sid -or $sid.EndsWith("-519")))) {
             return $true
         }
-        return $false
+
+        $isExcluded = ($sid -and ($excludedSids -contains $sid -or $sid.EndsWith('-519')))
+        $SidCache[$IdentityReference] = $isExcluded   # remember result
+        return $isExcluded
     }
     
     $domainSID = (Get-ADDomain).DomainSID.Value
@@ -61,56 +65,46 @@ function Get-BadSuccessorOUPermissions {
     # This will hold the output - every principal that has the required permissions and is not excluded, and on which OUs
     $allowedIdentities = @{}
 
-    $allOUs = Get-ADOrganizationalUnit -Filter * -Properties ntSecurityDescriptor | Select-Object DistinguishedName,ntSecurityDescriptor
+    $allOUs = Get-ADOrganizationalUnit -Filter * -Properties ntSecurityDescriptor | Select-Object DistinguishedName, ntSecurityDescriptor
 
     foreach ($ou in $allOUs) {     
-        foreach ($ou_access in $ou.ntSecurityDescriptor.Access) {
-            if ($ou_access.AccessControlType -ne "Allow") {
+        foreach ($ace in $ou.ntSecurityDescriptor.Access) {
+            if ($ace.AccessControlType -ne "Allow") {
                 continue
             }
-            if ($ou_access.ActiveDirectoryRights -notmatch $relevantRights) {
+            if ($ace.ActiveDirectoryRights -notmatch $relevantRights) {
                 continue
             }
-            if (!$relevantObjectTypes.ContainsKey($ou_access.ObjectType.Guid)) {
+            if (-not $relevantObjectTypes.ContainsKey($ace.ObjectType.Guid)) {
                 continue
             }            
 
-            # Check if identity is already in the allowedIdentities HT
-            if ($allowedIdentities.ContainsKey($ou_access.IdentityReference.Value)) {
-                $allowedIdentities[$ou_access.IdentityReference.Value] += ";$($ou.DistinguishedName)"
+            $identity = $ace.IdentityReference.Value
+            if (Test-IsExcludedSID $identity) { 
+                continue 
             }
-            else {
-                # Identity has the necessary permissions and is not in the allowed identities list yet. Try to find its sid to see if it is excluded
-                if (Test-ExcludedSID -IdentityReference $ou_access.IdentityReference.Value) {
-                    continue
-                }
-                $allowedIdentities[$ou_access.IdentityReference.Value] = "$($ou.DistinguishedName)"
+
+            if (-not $allowedIdentities.ContainsKey($identity)) {
+                $allowedIdentities[$identity] = [System.Collections.Generic.List[string]]::new()
             }
+            $allowedIdentities[$identity].Add($ou.DistinguishedName)
         }
 
         # Check the owner
         $owner = $ou.ntSecurityDescriptor.Owner
 
-        # Check if identity is already in the allowedIdentities HT
-        if ($allowedIdentities.ContainsKey($owner)) {
-            $allowedIdentities[$owner] += ";$($ou.DistinguishedName)"
-        }
-        else {
-            # This object is OU's owner, try to find its sid to see if it is excluded       
-            if (Test-ExcludedSID -IdentityReference $owner) {
-                continue
+        if (-not (Test-IsExcludedSID $owner)) {
+            if (-not $allowedIdentities.ContainsKey($owner)) {
+                $allowedIdentities[$owner] = [System.Collections.Generic.List[string]]::new()
             }
-            $allowedIdentities[$owner] = "$($ou.DistinguishedName)"
+            $allowedIdentities[$owner].Add($ou.DistinguishedName)
         }
     }
 
-    # Convert hash table to structured output
-    $results = foreach ($id in $allowedIdentities.Keys) {
+    foreach ($id in $allowedIdentities.Keys) {
         [PSCustomObject]@{
-            Identity             = $id
-            "OU Distinguished Name" = $allowedIdentities[$id] -split ';'
+            Identity = $id
+            OUs      = $allowedIdentities[$id].ToArray()
         }
     }
-
-    return $results
 }
