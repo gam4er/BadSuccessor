@@ -108,3 +108,8 @@ function Get-BadSuccessorOUPermissions {
         }
     }
 }
+
+# Auto-run if script is executed directly
+if ($MyInvocation.InvocationName -ne '.') {
+    Get-BadSuccessorOUPermissions @PSBoundParameters
+}
