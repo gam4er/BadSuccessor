@@ -22,6 +22,7 @@ function Get-BadSuccessorOUPermissions {
     function Test-IsExcludedSID {
         Param ([string]$IdentityReference)
 
+        if ([string]::IsNullOrWhiteSpace($IdentityReference)) { return $true }   # ← пропускаем пустые
         if ($SidCache.ContainsKey($IdentityReference)) {
             return $SidCache[$IdentityReference]      # instant hit
         }
@@ -101,15 +102,27 @@ function Get-BadSuccessorOUPermissions {
         }
     }
 
+    # ---------- подготовка пустого массива для результата ----------
+    $Report = @()        # можно также использовать [System.Collections.Generic.List[object]]::new()
+
+    # ---------- сбор данных ----------
     foreach ($id in $allowedIdentities.Keys) {
-        [PSCustomObject]@{
-            Identity = $id
-            OUs      = $allowedIdentities[$id].ToArray()
+        foreach ($ouDN in $allowedIdentities[$id]) {
+            $Report += [PSCustomObject]@{
+                Identity = $id
+                OUs      = $ouDN
+                OU_Canonical = (Get-ADObject $ouDN -Property CanonicalName).CanonicalName
+            }
         }
     }
+    $Report = $Report | Sort-Object Identity, OU, OU_Canonical -Unique
+
+    # ---------- интерактивный просмотр ----------
+    $Report | Out-GridView -Title 'BadSuccessor – разрешения OU'
+
 }
 
 # Auto-run if script is executed directly
-if ($MyInvocation.InvocationName -ne '.') {
+#if ($MyInvocation.InvocationName -ne '.') {
     Get-BadSuccessorOUPermissions @PSBoundParameters
-}
+#}
